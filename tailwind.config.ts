@@ -13,6 +13,10 @@ export default {
       },
     },
     extend: {
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'monospace'],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
@@ -57,6 +61,26 @@ export default {
           border: "hsl(var(--sidebar-border))",
           ring: "hsl(var(--sidebar-ring))",
         },
+        bloom: {
+          remember: "hsl(var(--bloom-remember))",
+          "remember-bg": "hsl(var(--bloom-remember-bg))",
+          understand: "hsl(var(--bloom-understand))",
+          "understand-bg": "hsl(var(--bloom-understand-bg))",
+          apply: "hsl(var(--bloom-apply))",
+          "apply-bg": "hsl(var(--bloom-apply-bg))",
+          analyze: "hsl(var(--bloom-analyze))",
+          "analyze-bg": "hsl(var(--bloom-analyze-bg))",
+          evaluate: "hsl(var(--bloom-evaluate))",
+          "evaluate-bg": "hsl(var(--bloom-evaluate-bg))",
+          create: "hsl(var(--bloom-create))",
+          "create-bg": "hsl(var(--bloom-create-bg))",
+        },
+        status: {
+          draft: "hsl(var(--status-draft))",
+          audited: "hsl(var(--status-audited))",
+          approved: "hsl(var(--status-approved))",
+          rejected: "hsl(var(--status-rejected))",
+        },
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -65,20 +89,12 @@ export default {
       },
       keyframes: {
         "accordion-down": {
-          from: {
-            height: "0",
-          },
-          to: {
-            height: "var(--radix-accordion-content-height)",
-          },
+          from: { height: "0" },
+          to: { height: "var(--radix-accordion-content-height)" },
         },
         "accordion-up": {
-          from: {
-            height: "var(--radix-accordion-content-height)",
-          },
-          to: {
-            height: "0",
-          },
+          from: { height: "var(--radix-accordion-content-height)" },
+          to: { height: "0" },
         },
       },
       animation: {
