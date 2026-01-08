@@ -14,7 +14,131 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      course_outcomes: {
+        Row: {
+          code: string
+          created_at: string
+          description: string
+          id: string
+          syllabus_id: string
+          unit_number: number | null
+        }
+        Insert: {
+          code: string
+          created_at?: string
+          description: string
+          id?: string
+          syllabus_id: string
+          unit_number?: number | null
+        }
+        Update: {
+          code?: string
+          created_at?: string
+          description?: string
+          id?: string
+          syllabus_id?: string
+          unit_number?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "course_outcomes_syllabus_id_fkey"
+            columns: ["syllabus_id"]
+            isOneToOne: false
+            referencedRelation: "syllabi"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      questions: {
+        Row: {
+          audit_feedback: string | null
+          bloom_level: Database["public"]["Enums"]["bloom_level"]
+          course_outcome_id: string | null
+          created_at: string
+          id: string
+          marks: number | null
+          quality_score: number | null
+          question_text: string
+          source_paragraph: string | null
+          status: Database["public"]["Enums"]["question_status"]
+          syllabus_id: string
+          updated_at: string
+        }
+        Insert: {
+          audit_feedback?: string | null
+          bloom_level?: Database["public"]["Enums"]["bloom_level"]
+          course_outcome_id?: string | null
+          created_at?: string
+          id?: string
+          marks?: number | null
+          quality_score?: number | null
+          question_text: string
+          source_paragraph?: string | null
+          status?: Database["public"]["Enums"]["question_status"]
+          syllabus_id: string
+          updated_at?: string
+        }
+        Update: {
+          audit_feedback?: string | null
+          bloom_level?: Database["public"]["Enums"]["bloom_level"]
+          course_outcome_id?: string | null
+          created_at?: string
+          id?: string
+          marks?: number | null
+          quality_score?: number | null
+          question_text?: string
+          source_paragraph?: string | null
+          status?: Database["public"]["Enums"]["question_status"]
+          syllabus_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "questions_course_outcome_id_fkey"
+            columns: ["course_outcome_id"]
+            isOneToOne: false
+            referencedRelation: "course_outcomes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "questions_syllabus_id_fkey"
+            columns: ["syllabus_id"]
+            isOneToOne: false
+            referencedRelation: "syllabi"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      syllabi: {
+        Row: {
+          content: string | null
+          created_at: string
+          file_name: string | null
+          file_url: string | null
+          id: string
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          content?: string | null
+          created_at?: string
+          file_name?: string | null
+          file_url?: string | null
+          id?: string
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          content?: string | null
+          created_at?: string
+          file_name?: string | null
+          file_url?: string | null
+          id?: string
+          title?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
@@ -23,7 +147,14 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
-      [_ in never]: never
+      bloom_level:
+        | "remember"
+        | "understand"
+        | "apply"
+        | "analyze"
+        | "evaluate"
+        | "create"
+      question_status: "draft" | "audited" | "approved" | "rejected"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +281,16 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      bloom_level: [
+        "remember",
+        "understand",
+        "apply",
+        "analyze",
+        "evaluate",
+        "create",
+      ],
+      question_status: ["draft", "audited", "approved", "rejected"],
+    },
   },
 } as const
