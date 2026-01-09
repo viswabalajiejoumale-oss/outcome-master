@@ -7,7 +7,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -83,6 +83,15 @@ serve(async (req) => {
   }
 
   try {
+    // Check API key
+    if (!LOVABLE_API_KEY) {
+      console.error("LOVABLE_API_KEY is not configured");
+      return new Response(
+        JSON.stringify({ error: "AI service not configured" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     // Authentication check
     const authHeader = req.headers.get("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
@@ -174,7 +183,7 @@ serve(async (req) => {
 
     const co = question.course_outcome;
 
-    // Generate a new question using MiMo-V2-Flash
+    // Generate a new question using Lovable AI (Gemini 2.5 Flash)
     const sanitizedCoCode = sanitizeForPrompt(co?.code || "CO", 50);
     const sanitizedCoDescription = sanitizeForPrompt(co?.description || "General topic", 500);
     const sanitizedQuestionText = sanitizeForPrompt(question.question_text, 2000);
@@ -197,15 +206,16 @@ Respond ONLY with a JSON object:
   "source_context": "Brief context"
 }`;
 
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    console.log(`Regenerating question ${questionId} for CO: ${sanitizedCoCode}`);
+
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": SUPABASE_URL,
       },
       body: JSON.stringify({
-        model: "xiaomi/mimo-v2-flash",
+        model: "google/gemini-2.5-flash",
         messages: [{ role: "user", content: prompt }],
         temperature: 0.8,
         max_tokens: 500,
@@ -213,7 +223,22 @@ Respond ONLY with a JSON object:
     });
 
     if (!response.ok) {
-      console.error(`Generator API error: ${response.status}`);
+      const errorText = await response.text();
+      console.error(`Generator API error: ${response.status} - ${errorText}`);
+      
+      if (response.status === 429) {
+        return new Response(
+          JSON.stringify({ error: "Rate limited by AI service. Please try again later." }),
+          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      if (response.status === 402) {
+        return new Response(
+          JSON.stringify({ error: "AI credits exhausted. Please add funds." }),
+          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      
       return new Response(
         JSON.stringify({ error: "Failed to generate question" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -222,9 +247,14 @@ Respond ONLY with a JSON object:
 
     const data = await response.json();
     const responseContent = data.choices?.[0]?.message?.content || "";
+    
+    // Log raw response for debugging
+    console.log(`Raw regenerate response:`, responseContent.substring(0, 300));
+    
     const jsonMatch = responseContent.match(/\{[\s\S]*\}/);
 
     if (!jsonMatch) {
+      console.error("No JSON found in regenerate response");
       return new Response(
         JSON.stringify({ error: "Failed to parse generated question" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -232,6 +262,7 @@ Respond ONLY with a JSON object:
     }
 
     const newQuestion = JSON.parse(jsonMatch[0]);
+    console.log(`Parsed new question:`, newQuestion.question_text?.substring(0, 100));
 
     // Update the question
     const { error: updateError } = await supabase
@@ -260,15 +291,14 @@ Respond with JSON:
   "feedback": "Brief feedback"
 }`;
 
-    const auditResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const auditResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": SUPABASE_URL,
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash-preview",
+        model: "google/gemini-2.5-flash",
         messages: [{ role: "user", content: auditPrompt }],
         temperature: 0.3,
         max_tokens: 300,
@@ -278,19 +308,37 @@ Respond with JSON:
     if (auditResponse.ok) {
       const auditData = await auditResponse.json();
       const auditContent = auditData.choices?.[0]?.message?.content || "";
+      
+      console.log(`Audit response:`, auditContent.substring(0, 200));
+      
       const auditMatch = auditContent.match(/\{[\s\S]*\}/);
 
       if (auditMatch) {
         const audit = JSON.parse(auditMatch[0]);
+        const finalScore = Math.max(audit.quality_score || 50, 30);
+        
         await supabase
           .from("questions")
           .update({
-            quality_score: audit.quality_score || 50,
+            quality_score: finalScore,
             audit_feedback: audit.feedback,
             status: "audited",
           })
           .eq("id", questionId);
+          
+        console.log(`Question ${questionId} audited with score ${finalScore}`);
       }
+    } else {
+      console.error(`Audit failed: ${auditResponse.status}`);
+      // Set default score if audit fails
+      await supabase
+        .from("questions")
+        .update({
+          quality_score: 50,
+          audit_feedback: "Audit pending",
+          status: "audited",
+        })
+        .eq("id", questionId);
     }
 
     return new Response(
