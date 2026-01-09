@@ -9,9 +9,11 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
 
 export default function UploadPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<{ name: string; size: number }[]>([]);
   const [fileContent, setFileContent] = useState("");
@@ -53,13 +55,14 @@ export default function UploadPage() {
     setIsProcessing(true);
 
     try {
-      // Create syllabus record
+      // Create syllabus record with user_id
       const { data: syllabus, error: syllabusError } = await supabase
         .from("syllabi")
         .insert({
           title: syllabusTitle,
           content: fileContent || "Manual entry",
           file_name: uploadedFiles[0]?.name || null,
+          user_id: user?.id,
         })
         .select()
         .single();

@@ -8,9 +8,11 @@ const corsHeaders = {
 
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const BLOOM_LEVELS = ["remember", "understand", "apply", "analyze", "evaluate", "create"];
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const BLOOM_VERBS: Record<string, string[]> = {
   remember: ["define", "list", "recall", "identify", "name", "state"],
   understand: ["explain", "describe", "summarize", "interpret", "classify"],
@@ -20,10 +22,23 @@ const BLOOM_VERBS: Record<string, string[]> = {
   create: ["create", "design", "develop", "construct", "propose", "formulate"],
 };
 
-interface CourseOutcome {
-  code: string;
-  description: string;
-  unit: number;
+// Input validation
+function validateUUID(id: string, fieldName: string): string | null {
+  if (!id || typeof id !== "string") {
+    return `${fieldName} is required`;
+  }
+  if (!UUID_REGEX.test(id)) {
+    return `${fieldName} must be a valid UUID`;
+  }
+  return null;
+}
+
+function sanitizeForPrompt(text: string, maxLength = 10000): string {
+  if (typeof text !== "string") return "";
+  return text
+    .replace(/[<>]/g, "")
+    .slice(0, maxLength)
+    .trim();
 }
 
 serve(async (req) => {
@@ -32,13 +47,85 @@ serve(async (req) => {
   }
 
   try {
-    const { syllabusId, content, courseOutcomes } = await req.json();
-
-    if (!syllabusId || !courseOutcomes || courseOutcomes.length === 0) {
-      throw new Error("Missing required fields: syllabusId and courseOutcomes");
+    // Authentication check
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
+    // Create client with user's JWT to validate auth
+    const userSupabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      global: { headers: { Authorization: authHeader } },
+    });
+
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await userSupabase.auth.getClaims(token);
+    
+    if (claimsError || !claimsData?.claims) {
+      console.error("Auth error:", claimsError);
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const userId = claimsData.claims.sub;
+
+    // Parse and validate input
+    const body = await req.json();
+    const { syllabusId, content, courseOutcomes } = body;
+
+    // Validate syllabusId
+    const syllabusIdError = validateUUID(syllabusId, "syllabusId");
+    if (syllabusIdError) {
+      return new Response(
+        JSON.stringify({ error: syllabusIdError }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate courseOutcomes array
+    if (!Array.isArray(courseOutcomes) || courseOutcomes.length === 0) {
+      return new Response(
+        JSON.stringify({ error: "courseOutcomes must be a non-empty array" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate content length
+    if (content && typeof content === "string" && content.length > 100000) {
+      return new Response(
+        JSON.stringify({ error: "Content too large (max 100,000 characters)" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Use service role client for database operations (RLS will still apply for user-facing queries)
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+    // Verify ownership of syllabus
+    const { data: syllabus, error: syllabusError } = await supabase
+      .from("syllabi")
+      .select("id, user_id")
+      .eq("id", syllabusId)
+      .single();
+
+    if (syllabusError || !syllabus) {
+      return new Response(
+        JSON.stringify({ error: "Syllabus not found" }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (syllabus.user_id !== userId) {
+      return new Response(
+        JSON.stringify({ error: "Forbidden" }),
+        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     // Fetch course outcomes from DB
     const { data: dbCourseOutcomes, error: coError } = await supabase
@@ -50,16 +137,29 @@ serve(async (req) => {
 
     console.log(`Generating questions for ${dbCourseOutcomes.length} course outcomes`);
 
-    const generatedQuestions: any[] = [];
+    const generatedQuestions: Array<{
+      syllabus_id: string;
+      course_outcome_id: string;
+      question_text: string;
+      bloom_level: string;
+      marks: number;
+      source_paragraph: string | null;
+      quality_score: number;
+      status: string;
+    }> = [];
 
     // Generate questions for each CO using MiMo-V2-Flash
     for (const co of dbCourseOutcomes) {
+      const sanitizedCode = sanitizeForPrompt(co.code, 50);
+      const sanitizedDescription = sanitizeForPrompt(co.description, 500);
+      const sanitizedContent = sanitizeForPrompt(content || "General knowledge in the subject area", 50000);
+
       const prompt = `You are an expert educator creating exam questions. Generate 5 questions for the following course outcome:
 
-Course Outcome: ${co.code} - ${co.description}
+Course Outcome: ${sanitizedCode} - ${sanitizedDescription}
 
 Syllabus Context:
-${content || "General knowledge in the subject area"}
+${sanitizedContent}
 
 Requirements:
 1. Create exactly 5 questions, one for each Bloom's Taxonomy level from "remember" to "create" (skip one level)
@@ -95,12 +195,7 @@ Respond ONLY with a JSON array of questions in this exact format:
           },
           body: JSON.stringify({
             model: "xiaomi/mimo-v2-flash",
-            messages: [
-              {
-                role: "user",
-                content: prompt,
-              },
-            ],
+            messages: [{ role: "user", content: prompt }],
             temperature: 0.7,
             max_tokens: 2000,
           }),
@@ -155,7 +250,7 @@ Respond ONLY with a JSON array of questions in this exact format:
         try {
           const auditPrompt = `You are an expert educational quality assessor. Evaluate this exam question for quality and alignment.
 
-Question: "${question.question_text}"
+Question: "${sanitizeForPrompt(question.question_text, 2000)}"
 Assigned Bloom Level: ${question.bloom_level}
 Assigned Marks: ${question.marks}
 
@@ -217,19 +312,13 @@ Respond ONLY with a JSON object:
         questionsGenerated: generatedQuestions.length,
         message: `Generated and audited ${generatedQuestions.length} questions`,
       }),
-      {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error: unknown) {
     console.error("Generate questions error:", error);
-    const message = error instanceof Error ? error.message : "Unknown error";
     return new Response(
-      JSON.stringify({ error: message }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      JSON.stringify({ error: "An error occurred processing your request" }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 });
