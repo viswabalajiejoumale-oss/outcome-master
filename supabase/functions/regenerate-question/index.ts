@@ -8,7 +8,10 @@ const corsHeaders = {
 
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const BLOOM_VERBS: Record<string, string[]> = {
   remember: ["define", "list", "recall", "identify", "name", "state"],
@@ -19,21 +22,75 @@ const BLOOM_VERBS: Record<string, string[]> = {
   create: ["create", "design", "develop", "construct", "propose", "formulate"],
 };
 
+// Input validation
+function validateUUID(id: string, fieldName: string): string | null {
+  if (!id || typeof id !== "string") {
+    return `${fieldName} is required`;
+  }
+  if (!UUID_REGEX.test(id)) {
+    return `${fieldName} must be a valid UUID`;
+  }
+  return null;
+}
+
+function sanitizeForPrompt(text: string, maxLength = 10000): string {
+  if (typeof text !== "string") return "";
+  return text
+    .replace(/[<>]/g, "")
+    .slice(0, maxLength)
+    .trim();
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { questionId } = await req.json();
-
-    if (!questionId) {
-      throw new Error("Missing questionId");
+    // Authentication check
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
+    // Create client with user's JWT to validate auth
+    const userSupabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      global: { headers: { Authorization: authHeader } },
+    });
+
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await userSupabase.auth.getClaims(token);
+    
+    if (claimsError || !claimsData?.claims) {
+      console.error("Auth error:", claimsError);
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const userId = claimsData.claims.sub;
+
+    // Parse and validate input
+    const body = await req.json();
+    const { questionId } = body;
+
+    // Validate questionId
+    const questionIdError = validateUUID(questionId, "questionId");
+    if (questionIdError) {
+      return new Response(
+        JSON.stringify({ error: questionIdError }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Use service role client for database operations
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-    // Fetch the existing question with its course outcome
+    // Fetch the existing question with its course outcome and syllabus
     const { data: question, error: qError } = await supabase
       .from("questions")
       .select(`
@@ -44,21 +101,37 @@ serve(async (req) => {
       .eq("id", questionId)
       .single();
 
-    if (qError || !question) throw qError || new Error("Question not found");
+    if (qError || !question) {
+      return new Response(
+        JSON.stringify({ error: "Question not found" }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Verify ownership via syllabus
+    if (question.syllabus?.user_id !== userId) {
+      return new Response(
+        JSON.stringify({ error: "Forbidden" }),
+        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     const co = question.course_outcome;
-    const syllabus = question.syllabus;
 
     // Generate a new question using MiMo-V2-Flash
+    const sanitizedCoCode = sanitizeForPrompt(co?.code || "CO", 50);
+    const sanitizedCoDescription = sanitizeForPrompt(co?.description || "General topic", 500);
+    const sanitizedQuestionText = sanitizeForPrompt(question.question_text, 2000);
+
     const prompt = `You are an expert educator. Generate a NEW, DIFFERENT question for:
 
-Course Outcome: ${co?.code || "CO"} - ${co?.description || "General topic"}
+Course Outcome: ${sanitizedCoCode} - ${sanitizedCoDescription}
 Target Bloom Level: ${question.bloom_level}
-Previous Question (create something different): "${question.question_text}"
+Previous Question (create something different): "${sanitizedQuestionText}"
 
 Requirements:
 1. Create a completely different question at the ${question.bloom_level} level
-2. Use appropriate action verbs: ${BLOOM_VERBS[question.bloom_level]?.join(", ")}
+2. Use appropriate action verbs: ${BLOOM_VERBS[question.bloom_level]?.join(", ") || "appropriate verbs"}
 3. Keep similar mark allocation: ${question.marks} marks
 
 Respond ONLY with a JSON object:
@@ -84,7 +157,11 @@ Respond ONLY with a JSON object:
     });
 
     if (!response.ok) {
-      throw new Error(`Generator API error: ${response.status}`);
+      console.error(`Generator API error: ${response.status}`);
+      return new Response(
+        JSON.stringify({ error: "Failed to generate question" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     const data = await response.json();
@@ -92,7 +169,10 @@ Respond ONLY with a JSON object:
     const jsonMatch = responseContent.match(/\{[\s\S]*\}/);
 
     if (!jsonMatch) {
-      throw new Error("Failed to parse generated question");
+      return new Response(
+        JSON.stringify({ error: "Failed to parse generated question" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     const newQuestion = JSON.parse(jsonMatch[0]);
@@ -114,7 +194,7 @@ Respond ONLY with a JSON object:
 
     // Now audit the new question
     const auditPrompt = `Evaluate this exam question:
-Question: "${newQuestion.question_text}"
+Question: "${sanitizeForPrompt(newQuestion.question_text, 2000)}"
 Bloom Level: ${question.bloom_level}
 Marks: ${newQuestion.marks || question.marks}
 
@@ -163,13 +243,9 @@ Respond with JSON:
     );
   } catch (error: unknown) {
     console.error("Regenerate error:", error);
-    const message = error instanceof Error ? error.message : "Unknown error";
     return new Response(
-      JSON.stringify({ error: message }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      JSON.stringify({ error: "An error occurred processing your request" }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 });

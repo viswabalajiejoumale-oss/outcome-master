@@ -1,5 +1,7 @@
-import { FileText, LayoutDashboard, HelpCircle, Settings, BookOpen, BarChart3, Upload } from "lucide-react";
+import { FileText, LayoutDashboard, HelpCircle, Settings, BookOpen, BarChart3, Upload, LogOut } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
+import { useAuth } from "@/hooks/useAuth";
+import { Button } from "@/components/ui/button";
 import {
   Sidebar,
   SidebarContent,
@@ -28,6 +30,7 @@ const secondaryNavItems = [
 
 export function AppSidebar() {
   const { state } = useSidebar();
+  const { user, signOut } = useAuth();
   const collapsed = state === "collapsed";
 
   return (
@@ -98,7 +101,25 @@ export function AppSidebar() {
       </SidebarContent>
 
       <SidebarFooter className="p-4 border-t border-sidebar-border">
-        {!collapsed && (
+        {user && (
+          <div className="space-y-2">
+            {!collapsed && (
+              <div className="text-xs text-sidebar-foreground/60 truncate">
+                {user.email}
+              </div>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={signOut}
+              className="w-full justify-start text-sidebar-foreground/80 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+            >
+              <LogOut className="w-4 h-4 shrink-0" />
+              {!collapsed && <span className="ml-2 text-sm">Sign Out</span>}
+            </Button>
+          </div>
+        )}
+        {!collapsed && !user && (
           <div className="text-[10px] text-sidebar-foreground/40">
             Powered by AI Agents
           </div>
