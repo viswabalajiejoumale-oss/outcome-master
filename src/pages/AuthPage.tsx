@@ -35,7 +35,26 @@ export default function AuthPage() {
     return () => subscription.unsubscribe();
   }, [navigate]);
 
-  const validateInput = () => {
+  const validatePassword = (pwd: string): { valid: boolean; message?: string } => {
+    if (pwd.length < 12) {
+      return { valid: false, message: "Password must be at least 12 characters" };
+    }
+    if (!/[a-z]/.test(pwd)) {
+      return { valid: false, message: "Password must contain at least one lowercase letter" };
+    }
+    if (!/[A-Z]/.test(pwd)) {
+      return { valid: false, message: "Password must contain at least one uppercase letter" };
+    }
+    if (!/[0-9]/.test(pwd)) {
+      return { valid: false, message: "Password must contain at least one number" };
+    }
+    if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(pwd)) {
+      return { valid: false, message: "Password must contain at least one special character" };
+    }
+    return { valid: true };
+  };
+
+  const validateInput = (isSignUp: boolean = false) => {
     if (!email.trim()) {
       toast.error("Email is required");
       return false;
@@ -49,16 +68,20 @@ export default function AuthPage() {
       toast.error("Password is required");
       return false;
     }
-    if (password.length < 6) {
-      toast.error("Password must be at least 6 characters");
-      return false;
+    // Only enforce strong password requirements on signup
+    if (isSignUp) {
+      const passwordValidation = validatePassword(password);
+      if (!passwordValidation.valid) {
+        toast.error(passwordValidation.message);
+        return false;
+      }
     }
     return true;
   };
 
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!validateInput()) return;
+    if (!validateInput(true)) return;
 
     setIsLoading(true);
     try {
@@ -89,7 +112,7 @@ export default function AuthPage() {
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!validateInput()) return;
+    if (!validateInput(false)) return;
 
     setIsLoading(true);
     try {
