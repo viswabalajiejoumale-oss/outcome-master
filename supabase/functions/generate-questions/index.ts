@@ -1,8 +1,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+// CORS headers - restrict to known origins
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": Deno.env.get("ALLOWED_ORIGIN") || "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
@@ -21,6 +22,41 @@ const BLOOM_VERBS: Record<string, string[]> = {
   evaluate: ["evaluate", "justify", "critique", "assess", "judge", "defend"],
   create: ["create", "design", "develop", "construct", "propose", "formulate"],
 };
+
+// Rate limiting configuration
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const MAX_REQUESTS_PER_WINDOW = 5; // 5 requests per minute per user
+
+// In-memory rate limit store (resets on cold start, suitable for edge functions)
+const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
+
+function checkRateLimit(userId: string): { allowed: boolean; retryAfterMs?: number } {
+  const now = Date.now();
+  const key = `generate:${userId}`;
+  const entry = rateLimitStore.get(key);
+
+  // Clean up expired entries periodically
+  if (rateLimitStore.size > 1000) {
+    for (const [k, v] of rateLimitStore.entries()) {
+      if (v.resetTime < now) {
+        rateLimitStore.delete(k);
+      }
+    }
+  }
+
+  if (!entry || entry.resetTime < now) {
+    // New window
+    rateLimitStore.set(key, { count: 1, resetTime: now + RATE_LIMIT_WINDOW_MS });
+    return { allowed: true };
+  }
+
+  if (entry.count >= MAX_REQUESTS_PER_WINDOW) {
+    return { allowed: false, retryAfterMs: entry.resetTime - now };
+  }
+
+  entry.count++;
+  return { allowed: true };
+}
 
 // Input validation
 function validateUUID(id: string, fieldName: string): string | null {
@@ -73,6 +109,26 @@ serve(async (req) => {
     }
 
     const userId = claimsData.claims.sub;
+
+    // Rate limiting check
+    const rateLimit = checkRateLimit(userId);
+    if (!rateLimit.allowed) {
+      console.log(`Rate limit exceeded for user ${userId}`);
+      return new Response(
+        JSON.stringify({ 
+          error: "Rate limit exceeded. Please wait before making another request.",
+          retryAfterMs: rateLimit.retryAfterMs 
+        }),
+        { 
+          status: 429, 
+          headers: { 
+            ...corsHeaders, 
+            "Content-Type": "application/json",
+            "Retry-After": String(Math.ceil((rateLimit.retryAfterMs || 60000) / 1000))
+          } 
+        }
+      );
+    }
 
     // Parse and validate input
     const body = await req.json();
