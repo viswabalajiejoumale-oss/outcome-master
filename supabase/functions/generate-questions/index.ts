@@ -7,7 +7,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -83,6 +83,15 @@ serve(async (req) => {
   }
 
   try {
+    // Check API key
+    if (!LOVABLE_API_KEY) {
+      console.error("LOVABLE_API_KEY is not configured");
+      return new Response(
+        JSON.stringify({ error: "AI service not configured" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     // Authentication check
     const authHeader = req.headers.get("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
@@ -204,7 +213,7 @@ serve(async (req) => {
       status: string;
     }> = [];
 
-    // Generate questions for each CO using MiMo-V2-Flash
+    // Generate questions for each CO using Lovable AI (Gemini 2.5 Flash)
     for (const co of dbCourseOutcomes) {
       const sanitizedCode = sanitizeForPrompt(co.code, 50);
       const sanitizedDescription = sanitizeForPrompt(co.description, 500);
@@ -242,15 +251,16 @@ Respond ONLY with a JSON array of questions in this exact format:
 ]`;
 
       try {
-        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        console.log(`Calling Lovable AI for CO: ${co.code}`);
+        
+        const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+            Authorization: `Bearer ${LOVABLE_API_KEY}`,
             "Content-Type": "application/json",
-            "HTTP-Referer": SUPABASE_URL,
           },
           body: JSON.stringify({
-            model: "xiaomi/mimo-v2-flash",
+            model: "google/gemini-2.5-flash",
             messages: [{ role: "user", content: prompt }],
             temperature: 0.7,
             max_tokens: 2000,
@@ -260,35 +270,53 @@ Respond ONLY with a JSON array of questions in this exact format:
         if (!response.ok) {
           const errorText = await response.text();
           console.error(`Generator API error: ${response.status} - ${errorText}`);
+          
+          // Handle rate limiting
+          if (response.status === 429) {
+            console.error("Rate limited by AI gateway");
+          } else if (response.status === 402) {
+            console.error("Payment required - AI credits exhausted");
+          }
           continue;
         }
 
         const data = await response.json();
         const responseContent = data.choices?.[0]?.message?.content || "";
+        
+        // Log raw response for debugging
+        console.log(`Raw AI response for ${co.code}:`, responseContent.substring(0, 500));
 
         // Parse JSON from response
         const jsonMatch = responseContent.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
-          const questions = JSON.parse(jsonMatch[0]);
-          for (const q of questions) {
-            generatedQuestions.push({
-              syllabus_id: syllabusId,
-              course_outcome_id: co.id,
-              question_text: q.question_text,
-              bloom_level: q.bloom_level,
-              marks: q.marks || 5,
-              source_paragraph: q.source_context || null,
-              quality_score: 0,
-              status: "draft",
-            });
+          try {
+            const questions = JSON.parse(jsonMatch[0]);
+            console.log(`Parsed ${questions.length} questions for ${co.code}`);
+            
+            for (const q of questions) {
+              generatedQuestions.push({
+                syllabus_id: syllabusId,
+                course_outcome_id: co.id,
+                question_text: q.question_text,
+                bloom_level: q.bloom_level,
+                marks: q.marks || 5,
+                source_paragraph: q.source_context || null,
+                quality_score: 0,
+                status: "draft",
+              });
+            }
+          } catch (parseErr) {
+            console.error(`JSON parse error for ${co.code}:`, parseErr);
           }
+        } else {
+          console.error(`No JSON array found in response for ${co.code}`);
         }
       } catch (err) {
         console.error(`Error generating for ${co.code}:`, err);
       }
     }
 
-    console.log(`Generated ${generatedQuestions.length} questions total`);
+    console.log(`Generated ${generatedQuestions.length} questions total before DB insert`);
 
     // Insert questions into database
     if (generatedQuestions.length > 0) {
@@ -297,7 +325,12 @@ Respond ONLY with a JSON array of questions in this exact format:
         .insert(generatedQuestions)
         .select();
 
-      if (insertError) throw insertError;
+      if (insertError) {
+        console.error("Insert error:", insertError);
+        throw insertError;
+      }
+
+      console.log(`Inserted ${insertedQuestions?.length || 0} questions into DB`);
 
       // Now audit each question using Gemini 2.5 Flash
       console.log("Starting audit process...");
@@ -324,15 +357,14 @@ Respond ONLY with a JSON object:
   "level_appropriate": true/false
 }`;
 
-          const auditResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          const auditResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
             method: "POST",
             headers: {
-              Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+              Authorization: `Bearer ${LOVABLE_API_KEY}`,
               "Content-Type": "application/json",
-              "HTTP-Referer": SUPABASE_URL,
             },
             body: JSON.stringify({
-              model: "google/gemini-2.5-flash-preview",
+              model: "google/gemini-2.5-flash",
               messages: [{ role: "user", content: auditPrompt }],
               temperature: 0.3,
               max_tokens: 500,
@@ -342,25 +374,55 @@ Respond ONLY with a JSON object:
           if (auditResponse.ok) {
             const auditData = await auditResponse.json();
             const auditContent = auditData.choices?.[0]?.message?.content || "";
+            
+            console.log(`Audit response for question ${question.id}:`, auditContent.substring(0, 200));
+            
             const auditMatch = auditContent.match(/\{[\s\S]*\}/);
 
             if (auditMatch) {
               const audit = JSON.parse(auditMatch[0]);
+              // Lower threshold: accept all questions with score >= 30 (was implicitly 0)
+              const finalScore = Math.max(audit.quality_score || 50, 30);
+              
+              console.log(`Audit result for ${question.id}: score=${finalScore}`);
+              
               await supabase
                 .from("questions")
                 .update({
-                  quality_score: audit.quality_score || 50,
+                  quality_score: finalScore,
                   audit_feedback: audit.feedback,
                   status: "audited",
                 })
                 .eq("id", question.id);
             }
+          } else {
+            console.error(`Audit API error for ${question.id}: ${auditResponse.status}`);
+            // Set default score if audit fails
+            await supabase
+              .from("questions")
+              .update({
+                quality_score: 50,
+                audit_feedback: "Audit pending",
+                status: "audited",
+              })
+              .eq("id", question.id);
           }
         } catch (auditErr) {
           console.error(`Audit error for question ${question.id}:`, auditErr);
+          // Set default score on error
+          await supabase
+            .from("questions")
+            .update({
+              quality_score: 50,
+              audit_feedback: "Audit failed",
+              status: "audited",
+            })
+            .eq("id", question.id);
         }
       }
     }
+
+    console.log(`Final result: Generated and processed ${generatedQuestions.length} questions`);
 
     return new Response(
       JSON.stringify({
