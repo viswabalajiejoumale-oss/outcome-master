@@ -198,7 +198,30 @@ serve(async (req) => {
       .select("*")
       .eq("syllabus_id", syllabusId);
 
-    if (coError) throw coError;
+    if (coError) {
+      console.error("Course outcomes query error:", coError);
+      throw coError;
+    }
+
+    // Debug: Log context being used
+    console.log("=== DEBUG: Syllabus Context ===");
+    console.log("Syllabus ID:", syllabusId);
+    console.log("Content length:", content?.length || 0);
+    console.log("Content preview:", content?.substring(0, 200) || "No content");
+    console.log("Course outcomes found:", dbCourseOutcomes?.length || 0);
+    console.log("Course outcomes:", JSON.stringify(dbCourseOutcomes, null, 2));
+
+    if (!dbCourseOutcomes || dbCourseOutcomes.length === 0) {
+      console.error("No course outcomes found for syllabus:", syllabusId);
+      return new Response(
+        JSON.stringify({ 
+          error: "No course outcomes found for this syllabus",
+          syllabusId,
+          questionsGenerated: 0 
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     console.log(`Generating questions for ${dbCourseOutcomes.length} course outcomes`);
 
@@ -283,15 +306,22 @@ Respond ONLY with a JSON array of questions in this exact format:
         const data = await response.json();
         const responseContent = data.choices?.[0]?.message?.content || "";
         
-        // Log raw response for debugging
-        console.log(`Raw AI response for ${co.code}:`, responseContent.substring(0, 500));
+        // Debug: Log raw AI output
+        console.log("=== DEBUG: Raw AI Output ===");
+        console.log(`CO: ${co.code}`);
+        console.log("Full response:", responseContent);
+        console.log("Response length:", responseContent.length);
 
         // Parse JSON from response
         const jsonMatch = responseContent.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
+          console.log("=== DEBUG: JSON Match Found ===");
+          console.log("Matched JSON:", jsonMatch[0].substring(0, 500));
+          
           try {
             const questions = JSON.parse(jsonMatch[0]);
             console.log(`Parsed ${questions.length} questions for ${co.code}`);
+            console.log("Parsed questions:", JSON.stringify(questions, null, 2));
             
             for (const q of questions) {
               generatedQuestions.push({
@@ -307,9 +337,11 @@ Respond ONLY with a JSON array of questions in this exact format:
             }
           } catch (parseErr) {
             console.error(`JSON parse error for ${co.code}:`, parseErr);
+            console.error("Attempted to parse:", jsonMatch[0]);
           }
         } else {
           console.error(`No JSON array found in response for ${co.code}`);
+          console.error("Full response was:", responseContent);
         }
       } catch (err) {
         console.error(`Error generating for ${co.code}:`, err);

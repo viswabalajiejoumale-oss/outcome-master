@@ -101,12 +101,29 @@ export default function UploadPage() {
         },
       });
 
+      console.log("Edge function response:", { genData, genError });
+
       if (genError) throw genError;
 
-      toast({
-        title: "Questions Generated!",
-        description: `Created ${genData.questionsGenerated || 0} questions. Now auditing...`,
-      });
+      // Check for error in response data (edge functions may return errors in data)
+      if (genData?.error) {
+        throw new Error(genData.error);
+      }
+
+      const questionsGenerated = genData?.questionsGenerated || 0;
+      
+      if (questionsGenerated === 0) {
+        toast({
+          title: "No questions generated",
+          description: "The AI could not generate questions. Check the edge function logs for details.",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Questions Generated!",
+          description: `Created ${questionsGenerated} questions.`,
+        });
+      }
 
       // Navigate to questions page
       navigate("/questions");
@@ -205,7 +222,7 @@ CO4: Design efficient solutions to computational problems`}
         </Button>
 
         <p className="text-xs text-center text-muted-foreground">
-          Questions will be generated using the MiMo-V2-Flash model and audited by Gemini 2.5 Flash
+          Questions will be generated and audited using Gemini 2.5 Flash
         </p>
       </div>
     </AppLayout>
